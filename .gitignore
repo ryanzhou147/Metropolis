@@ -122,3 +122,6 @@ Thumbs.db
 
 *.json
 .pytest_cache/
+
+# Dolt database files (added by bd init)
+.dolt/
