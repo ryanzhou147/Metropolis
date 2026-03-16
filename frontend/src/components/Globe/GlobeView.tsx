@@ -1,0 +1,364 @@
+import { useRef, useEffect, useMemo, useCallback, useState } from 'react'
+import Globe from 'react-globe.gl'
+import * as THREE from 'three'
+import type { Event } from '../../types/events'
+import { useAppContext, EVENT_TYPE_COLORS, type ArcData } from '../../context/AppContext'
+import { useAgentContext } from '../../context/AgentContext'
+import AgentNavigationOverlay from '../Agent/AgentNavigationOverlay'
+
+interface GlobePoint {
+  id: string
+  lat: number
+  lng: number
+  color: string
+  size: number
+  label: string
+  event: Event
+  isPulsing: boolean
+}
+
+export default function GlobeView() {
+  const globeRef = useRef<any>(null)
+  const { events, timelinePosition, activeFilters, selectedEventId, setSelectedEventId, arcs, stopAutoSpin, globeFocusTarget, setGlobeFocusTarget } = useAppContext()
+  const { activeHighlights } = useAgentContext()
+
+  // Monochrome globe material — medium dark grey base
+  const globeMaterial = useMemo(() => new THREE.MeshPhongMaterial({
+    color: '#141414',
+    emissive: '#0a0a0a',
+    specular: '#2a2a2a',
+    shininess: 4,
+  }), [])
+
+  // Country hex-dot layer
+  const [countriesData, setCountriesData] = useState<{ features: object[] }>({ features: [] })
+  useEffect(() => {
+    fetch('/countries.geojson').then(r => r.json()).then(setCountriesData)
+  }, [])
+
+// Track camera altitude via ref so the points array never recalculates on zoom.
+  // A rAF-throttled tick triggers re-renders so the pointRadius accessor picks up
+  // the new altitude without rebuilding or rememoising the points array.
+  const altRef = useRef(2.5)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [, setAltitudeTick] = useState(0)
+
+  const handleZoom = useCallback(({ altitude }: { altitude: number }) => {
+    if (Math.abs(altitude - altRef.current) < 0.01) return
+    altRef.current = altitude
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null
+      setAltitudeTick(t => t + 1)
+    }, 120)
+  }, [])
+
+  // Compute visible event IDs based on timeline + filters
+  const visibleIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const evt of events) {
+      if (!activeFilters.has(evt.event_type)) continue
+      if (timelinePosition && new Date(evt.start_time) > timelinePosition) continue
+      ids.add(evt.id)
+    }
+    return ids
+  }, [events, timelinePosition, activeFilters])
+
+  // All points — never filtered out, so pointsData is stable and react-globe.gl
+  // never re-animates on filter change. Visibility is controlled via pointRadius/pointColor.
+  const allPoints = useMemo<GlobePoint[]>(() => {
+    return events.map(evt => {
+      const baseColor = EVENT_TYPE_COLORS[evt.event_type] ?? '#888888'
+      return {
+        id: evt.id,
+        lat: evt.primary_latitude,
+        lng: evt.primary_longitude,
+        color: baseColor,
+        size: 0.35,
+        label: '',
+        event: evt,
+        isPulsing: false,
+      }
+    })
+  }, [events])
+
+  // Hover tooltips — single point and cluster modal
+  const mousePosRef = useRef({ x: 0, y: 0 })
+  const clusterHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const isOverModalRef = useRef(false)
+  const [clusterGroup, setClusterGroup] = useState<{ points: GlobePoint[], x: number, y: number } | null>(null)
+  const [hoveredSingle, setHoveredSingle] = useState<{ point: GlobePoint, x: number, y: number } | null>(null)
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    mousePosRef.current = { x: e.clientX, y: e.clientY }
+    setHoveredSingle(prev => prev ? { ...prev, x: e.clientX, y: e.clientY } : null)
+
+    setClusterGroup(prev => {
+      if (!prev || isOverModalRef.current) return prev
+      const dx = e.clientX - prev.x
+      const dy = e.clientY - prev.y
+      if (Math.abs(dx) > 60 || Math.abs(dy) > 60) return null
+      return prev
+    })
+  }, [])
+
+  const scheduleHide = useCallback(() => {
+    if (clusterHideTimer.current) clearTimeout(clusterHideTimer.current)
+    clusterHideTimer.current = setTimeout(() => {
+      if (!isOverModalRef.current) setClusterGroup(null)
+    }, 80)
+  }, [])
+
+  const handlePointHover = useCallback((point: object | null) => {
+    if (clusterHideTimer.current) {
+      clearTimeout(clusterHideTimer.current)
+      clusterHideTimer.current = null
+    }
+    const p = point as GlobePoint | null
+    if (!p) {
+      setHoveredSingle(null)
+      scheduleHide()
+      return
+    }
+    // Threshold scales directly with altitude — smaller when zoomed in, larger when zoomed out
+    const threshold = altRef.current * 2
+    const nearby = allPoints.filter(pt => {
+      if (!visibleIds.has(pt.id)) return false
+      const dlat = pt.lat - p.lat
+      const dlng = pt.lng - p.lng
+      return Math.sqrt(dlat * dlat + dlng * dlng) < threshold
+    })
+    if (nearby.length > 1) {
+      setHoveredSingle(null)
+      setClusterGroup({ points: nearby, x: mousePosRef.current.x, y: mousePosRef.current.y })
+    } else {
+      setClusterGroup(null)
+      setHoveredSingle(visibleIds.has(p.id) ? { point: p, x: mousePosRef.current.x, y: mousePosRef.current.y } : null)
+    }
+  }, [allPoints, visibleIds, scheduleHide])
+
+  // Build highlighted arc pairs from agent context
+  const highlightedArcKeys = useMemo(() => {
+    return new Set(activeHighlights.map(h => [h.event_a_id, h.event_b_id].sort().join('|')))
+  }, [activeHighlights])
+
+  const visibleArcs = useMemo<ArcData[]>(() => {
+    return arcs
+      .filter(a => visibleIds.has(a.eventAId) && visibleIds.has(a.eventBId))
+      .map(a => {
+        const key = [a.eventAId, a.eventBId].sort().join('|')
+        const isConnectedToSelected = selectedEventId !== null &&
+          (a.eventAId === selectedEventId || a.eventBId === selectedEventId)
+        if (highlightedArcKeys.has(key) || isConnectedToSelected) {
+          return { ...a, color: '#ffffff', highlighted: true }
+        }
+        return a
+      })
+  }, [arcs, visibleIds, highlightedArcKeys, selectedEventId])
+
+  // Disable raycasting on arc tube meshes so they never block point clicks
+  useEffect(() => {
+    const globe = globeRef.current
+    if (!globe) return
+    const timer = setTimeout(() => {
+      globe.scene().traverse((obj: THREE.Object3D) => {
+        const mesh = obj as THREE.Mesh
+        if (mesh.isMesh && mesh.geometry?.type === 'TubeGeometry') {
+          mesh.raycast = () => {}
+        }
+      })
+    }, 50)
+    return () => clearTimeout(timer)
+  }, [visibleArcs])
+
+  const handlePointClick = useCallback((point: object) => {
+    const p = point as GlobePoint
+    if (p?.id) {
+      stopAutoSpin()
+      setSelectedEventId(p.id)
+      globeRef.current?.pointOfView({ lat: p.lat - 3, lng: p.lng, altitude: 0.3 }, 800)
+    }
+  }, [setSelectedEventId, stopAutoSpin])
+
+  // Pan globe when a related event is clicked from the modal
+  useEffect(() => {
+    if (!globeFocusTarget) return
+    globeRef.current?.pointOfView({ lat: globeFocusTarget.lat - 3, lng: globeFocusTarget.lng, altitude: 0.3 }, 800)
+    setGlobeFocusTarget(null)
+  }, [globeFocusTarget, setGlobeFocusTarget])
+
+  // Reduce spin momentum — default dampingFactor is ~0.1 (floaty); 0.4 stops much sooner
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const controls = globeRef.current?.controls()
+      if (controls) controls.dampingFactor = 0.4
+    }, 100)
+    return () => clearTimeout(timer)
+  }, [])
+
+  // Cancel any pending debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current !== null) clearTimeout(debounceRef.current)
+    }
+  }, [])
+
+
+  return (
+    <div className="w-full h-full bg-black" onMouseMove={handleMouseMove}>
+      <Globe
+        ref={globeRef}
+        globeMaterial={globeMaterial}
+        showGraticules={false}
+        backgroundColor="rgba(0,0,0,1)"
+        backgroundImageUrl=""
+        // Country hex dots — land layer
+        hexPolygonsData={countriesData.features}
+        hexPolygonResolution={4}
+        hexPolygonMargin={0.7}
+        hexPolygonAltitude={0.004}
+        hexPolygonColor={(d: object) => {
+          const props = (d as { properties?: Record<string, string> }).properties ?? {}
+          const isCanada = props.ISO_A3 === 'CAN' || props.iso_a3 === 'CAN' || props.ADMIN === 'Canada' || props.NAME === 'Canada'
+          return isCanada ? 'rgba(220, 60, 40, 0.95)' : 'rgba(255, 255, 255, 0.5)'
+        }}
+        // Points
+        pointsData={allPoints}
+        pointLat="lat"
+        pointLng="lng"
+        pointColor={(d: object) => {
+          const p = d as GlobePoint
+          if (!visibleIds.has(p.id)) return 'rgba(0,0,0,0)'
+          if (p.id === selectedEventId) return '#ffffff'
+          return p.color
+        }}
+        pointRadius={(d: object) => {
+          const p = d as GlobePoint
+          if (!visibleIds.has(p.id)) return 0
+          return Math.max(p.size * (altRef.current / 2.5), 0.15)
+        }}
+        pointResolution={6}
+        pointAltitude={0.015}
+        pointLabel={() => ''}
+        onPointClick={handlePointClick}
+        onPointHover={handlePointHover}
+        onZoom={handleZoom}
+        // Arcs
+        arcsData={visibleArcs}
+        arcStartLat="startLat"
+        arcStartLng="startLng"
+        arcEndLat="endLat"
+        arcEndLng="endLng"
+        arcColor={(d: object) => {
+          const arc = d as ArcData & { highlighted?: boolean }
+          if (arc.highlighted) return ['#ffffffaa', '#ffffff44']
+          return [`${arc.color}55`, `${arc.color}22`]
+        }}
+        arcAltitude={(d: object) => {
+          const arc = d as ArcData
+          const toRad = (deg: number) => deg * Math.PI / 180
+          const dLat = toRad(arc.endLat - arc.startLat)
+          const dLng = toRad(arc.endLng - arc.startLng)
+          const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(arc.startLat)) * Math.cos(toRad(arc.endLat)) * Math.sin(dLng / 2) ** 2
+          const distDeg = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * (180 / Math.PI)
+          // Scale: 0° → 0.05, 180° → 0.4
+          return 0.05 + (distDeg / 180) * 0.35
+        }}
+        arcStroke={(d: object) => {
+          const arc = d as ArcData & { highlighted?: boolean }
+          return arc.highlighted ? 0.8 : 0.25
+        }}
+        arcDashLength={1}
+        arcDashGap={0}
+        // Atmosphere
+        atmosphereColor="#555555"
+        atmosphereAltitude={0.06}
+        width={window.innerWidth}
+        height={window.innerHeight}
+      />
+      <AgentNavigationOverlay globeRef={globeRef} />
+
+      {hoveredSingle && (
+        <div
+          style={{
+            position: 'fixed',
+            left: hoveredSingle.x + 14,
+            top: hoveredSingle.y - 10,
+            zIndex: 1000,
+            background: '#111111',
+            border: '1px solid #2a2a2a',
+            padding: '6px 10px',
+            fontSize: '11px',
+            maxWidth: '200px',
+            fontFamily: 'Space Mono, Courier New, monospace',
+            pointerEvents: 'none',
+          }}
+        >
+          <div style={{ color: '#d0d0d0', fontWeight: 'bold', fontSize: '11px', lineHeight: '1.3', marginBottom: '2px' }}>
+            {hoveredSingle.point.event.title}
+          </div>
+          <div style={{ color: hoveredSingle.point.color, fontSize: '10px' }}>
+            {hoveredSingle.point.event.event_type.replace(/_/g, ' ')}
+          </div>
+        </div>
+      )}
+
+      {clusterGroup && clusterGroup.points.length > 1 && (
+        <div
+          style={{
+            position: 'fixed',
+            left: clusterGroup.x + 14,
+            top: clusterGroup.y - 10,
+            zIndex: 1000,
+            background: '#111111',
+            border: '1px solid #2a2a2a',
+            fontFamily: 'Space Mono, Courier New, monospace',
+            fontSize: '11px',
+            width: '220px',
+            maxHeight: '240px',
+            overflowY: 'auto',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.7)',
+          }}
+          onMouseEnter={() => {
+            isOverModalRef.current = true
+            if (clusterHideTimer.current) {
+              clearTimeout(clusterHideTimer.current)
+              clusterHideTimer.current = null
+            }
+          }}
+          onMouseLeave={() => {
+            isOverModalRef.current = false
+            scheduleHide()
+          }}
+        >
+          {clusterGroup.points.map((p, i) => (
+            <div
+              key={p.id}
+              onClick={() => {
+                stopAutoSpin()
+                setSelectedEventId(p.id)
+                globeRef.current?.pointOfView({ lat: p.lat - 3, lng: p.lng, altitude: 0.3 }, 800)
+                setClusterGroup(null)
+              }}
+              style={{
+                padding: '7px 10px',
+                borderBottom: i < clusterGroup.points.length - 1 ? '1px solid #1e1e1e' : 'none',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = '#1a1a1a' }}
+              onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+            >
+              <div style={{ color: '#d0d0d0', fontWeight: 'bold', marginBottom: '2px', lineHeight: '1.3' }}>
+                {p.event.title}
+              </div>
+              <div style={{ color: p.color, fontSize: '10px' }}>
+                {p.event.event_type.replace(/_/g, ' ')}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
