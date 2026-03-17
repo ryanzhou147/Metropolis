@@ -78,6 +78,8 @@ Icon
 .opencode
 .beads
 openspec
+AGENTS.md
+.obsidian
 
 # Database
 *.sqlite3

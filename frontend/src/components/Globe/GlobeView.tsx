@@ -171,6 +171,49 @@ export default function GlobeView() {
     return () => clearTimeout(timer)
   }, [visibleArcs])
 
+  const pointColorAccessor = useCallback((d: object) => {
+    const p = d as GlobePoint
+    if (!visibleIds.has(p.id)) return 'rgba(0,0,0,0)'
+    if (p.id === selectedEventId) return '#ffffff'
+    return p.color
+  }, [visibleIds, selectedEventId])
+
+  const pointRadiusAccessor = useCallback((d: object) => {
+    const p = d as GlobePoint
+    if (!visibleIds.has(p.id)) return 0
+    return Math.max(p.size * (altRef.current / 2.5), 0.15)
+  }, [visibleIds])
+
+  const pointLabelAccessor = useCallback(() => '', [])
+
+  const hexPolygonColorAccessor = useCallback((d: object) => {
+    const props = (d as { properties?: Record<string, string> }).properties ?? {}
+    const isCanada = props.ISO_A3 === 'CAN' || props.iso_a3 === 'CAN' || props.ADMIN === 'Canada' || props.NAME === 'Canada'
+    return isCanada ? 'rgba(220, 60, 40, 0.95)' : 'rgba(255, 255, 255, 0.5)'
+  }, [])
+
+  const arcColorAccessor = useCallback((d: object) => {
+    const arc = d as ArcData & { highlighted?: boolean }
+    if (arc.highlighted) return ['#ffffffaa', '#ffffff44']
+    return [`${arc.color}55`, `${arc.color}22`]
+  }, [])
+
+  const arcAltitudeAccessor = useCallback((d: object) => {
+    const arc = d as ArcData
+    const toRad = (deg: number) => deg * Math.PI / 180
+    const dLat = toRad(arc.endLat - arc.startLat)
+    const dLng = toRad(arc.endLng - arc.startLng)
+    const a = Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(arc.startLat)) * Math.cos(toRad(arc.endLat)) * Math.sin(dLng / 2) ** 2
+    const distDeg = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * (180 / Math.PI)
+    return 0.05 + (distDeg / 180) * 0.35
+  }, [])
+
+  const arcStrokeAccessor = useCallback((d: object) => {
+    const arc = d as ArcData & { highlighted?: boolean }
+    return arc.highlighted ? 0.8 : 0.25
+  }, [])
+
   const handlePointClick = useCallback((point: object) => {
     const p = point as GlobePoint
     if (p?.id) {
@@ -217,29 +260,16 @@ export default function GlobeView() {
         hexPolygonResolution={4}
         hexPolygonMargin={0.7}
         hexPolygonAltitude={0.004}
-        hexPolygonColor={(d: object) => {
-          const props = (d as { properties?: Record<string, string> }).properties ?? {}
-          const isCanada = props.ISO_A3 === 'CAN' || props.iso_a3 === 'CAN' || props.ADMIN === 'Canada' || props.NAME === 'Canada'
-          return isCanada ? 'rgba(220, 60, 40, 0.95)' : 'rgba(255, 255, 255, 0.5)'
-        }}
+        hexPolygonColor={hexPolygonColorAccessor}
         // Points
         pointsData={allPoints}
         pointLat="lat"
         pointLng="lng"
-        pointColor={(d: object) => {
-          const p = d as GlobePoint
-          if (!visibleIds.has(p.id)) return 'rgba(0,0,0,0)'
-          if (p.id === selectedEventId) return '#ffffff'
-          return p.color
-        }}
-        pointRadius={(d: object) => {
-          const p = d as GlobePoint
-          if (!visibleIds.has(p.id)) return 0
-          return Math.max(p.size * (altRef.current / 2.5), 0.15)
-        }}
+        pointColor={pointColorAccessor}
+        pointRadius={pointRadiusAccessor}
         pointResolution={6}
         pointAltitude={0.015}
-        pointLabel={() => ''}
+        pointLabel={pointLabelAccessor}
         onPointClick={handlePointClick}
         onPointHover={handlePointHover}
         onZoom={handleZoom}
@@ -249,26 +279,9 @@ export default function GlobeView() {
         arcStartLng="startLng"
         arcEndLat="endLat"
         arcEndLng="endLng"
-        arcColor={(d: object) => {
-          const arc = d as ArcData & { highlighted?: boolean }
-          if (arc.highlighted) return ['#ffffffaa', '#ffffff44']
-          return [`${arc.color}55`, `${arc.color}22`]
-        }}
-        arcAltitude={(d: object) => {
-          const arc = d as ArcData
-          const toRad = (deg: number) => deg * Math.PI / 180
-          const dLat = toRad(arc.endLat - arc.startLat)
-          const dLng = toRad(arc.endLng - arc.startLng)
-          const a = Math.sin(dLat / 2) ** 2 +
-            Math.cos(toRad(arc.startLat)) * Math.cos(toRad(arc.endLat)) * Math.sin(dLng / 2) ** 2
-          const distDeg = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * (180 / Math.PI)
-          // Scale: 0° → 0.05, 180° → 0.4
-          return 0.05 + (distDeg / 180) * 0.35
-        }}
-        arcStroke={(d: object) => {
-          const arc = d as ArcData & { highlighted?: boolean }
-          return arc.highlighted ? 0.8 : 0.25
-        }}
+        arcColor={arcColorAccessor}
+        arcAltitude={arcAltitudeAccessor}
+        arcStroke={arcStrokeAccessor}
         arcDashLength={1}
         arcDashGap={0}
         // Atmosphere

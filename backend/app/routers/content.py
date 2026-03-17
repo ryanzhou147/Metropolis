@@ -26,7 +26,9 @@ def _get_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL not set")
-    return psycopg2.connect(url)
+    # psycopg2 expects postgresql://; strip +asyncpg (or other driver) so one URL works everywhere
+    dsn = url.replace("postgresql+asyncpg://", "postgresql://", 1).replace("postgres+asyncpg://", "postgres://", 1)
+    return psycopg2.connect(dsn)
 
 
 def _parse_embedding(emb) -> Optional[list]:
@@ -53,8 +55,13 @@ def _cosine_similarity(a: list, b: list) -> float:
 
 @router.get("/points")
 def get_content_points():
-    """Return content_table rows with location data from the last 31 days."""
-    conn = _get_connection()
+    """Return content_table rows with location data from the last 31 days.
+    Returns empty list on DB/connection errors so the frontend can still load."""
+    try:
+        conn = _get_connection()
+    except Exception as e:
+        logger.warning("get_content_points: DB unavailable: %s", e)
+        return {"points": []}
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -91,6 +98,9 @@ def get_content_points():
                 }
             )
         return {"points": points}
+    except Exception as e:
+        logger.warning("get_content_points: query failed: %s", e)
+        return {"points": []}
     finally:
         conn.close()
 

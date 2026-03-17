@@ -302,7 +302,25 @@ export default function AgentPanel() {
 
           {agentResponse && !isLoading && (
             <div className="py-4">
-              <AgentAnswerView response={agentResponse} />
+              {agentResponse.relevant_event_ids.length === 0 &&
+               Object.keys(agentResponse.cited_event_map ?? {}).length === 0 ? (
+                <div className="min-h-[200px] flex flex-col items-center justify-center gap-3 text-center">
+                  <div
+                    className="w-10 h-10 flex items-center justify-center"
+                    style={{ background: 'var(--bg-raised)', border: '1px solid var(--border)' }}
+                  >
+                    <svg className="w-4 h-4" style={{ color: 'var(--text-muted)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </div>
+                  <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>No matching events found</p>
+                  <p className="text-xs max-w-[240px]" style={{ color: 'var(--text-muted)' }}>
+                    Try rephrasing your query or broadening your filters to see more results.
+                  </p>
+                </div>
+              ) : (
+                <AgentAnswerView response={agentResponse} />
+              )}
             </div>
           )}
         </div>

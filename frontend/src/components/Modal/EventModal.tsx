@@ -314,7 +314,27 @@ export default function EventModal() {
           </svg>
         </button>
 
-        {ev && (
+        {/* Loading skeleton while detail is fetching */}
+        {ev && !detail && (
+          <div className="flex flex-col">
+            <div className="h-44 flex-shrink-0 animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+            <div className="px-5 py-4 flex flex-col gap-4">
+              <div className="h-5 w-3/4 animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+              <div className="flex gap-3">
+                <div className="h-3 w-24 animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+                <div className="h-3 w-32 animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+              </div>
+              <div className="h-px" style={{ background: 'var(--border)' }} />
+              <div className="flex flex-col gap-2">
+                <div className="h-3 w-full animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+                <div className="h-3 w-full animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+                <div className="h-3 w-2/3 animate-pulse" style={{ background: 'var(--bg-raised)' }} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {ev && detail && (
           <div className="flex flex-col">
             {/* Hero media */}
             {(() => {

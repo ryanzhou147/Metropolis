@@ -11,7 +11,7 @@ import type {
 // EventDetail intentionally removed — modal now uses getContentById
 import type { AgentResponse } from '../types/agent'
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? '/api'
+const BASE_URL = (import.meta.env.VITE_API_URL ?? '/api').replace(/\/$/, '')
 
 async function fetchJson<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`)
