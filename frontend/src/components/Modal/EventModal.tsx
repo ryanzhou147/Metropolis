@@ -4,7 +4,6 @@ import type { ContentDetail } from '../../types/events'
 import { useAppContext, EVENT_TYPE_COLORS, EVENT_TYPE_LABELS } from '../../context/AppContext'
 import type { EventType } from '../../types/events'
 import { useAgentContext } from '../../context/AgentContext'
-import { getMediaUrls } from '../../utils/mediaConfig'
 import FinancialImpactSection from '../Agent/FinancialImpactSection'
 import RealTimeAnalysisSection from './RealTimeAnalysisSection'
 
@@ -338,22 +337,12 @@ export default function EventModal() {
           <div className="flex flex-col">
             {/* Hero media */}
             {(() => {
-              const media = getMediaUrls(ev.image_url, ev.image_s3_url)
-              const isPlaceholder = media.primary === '/placeholder-event.svg'
+              const imgSrc = ev.image_url || '/placeholder-event.svg'
               return (
                 <div className="relative h-44 flex-shrink-0 overflow-hidden" style={{ background: 'var(--bg-raised)' }}>
-                  {media.isVideo ? (
-                    <HeroVideo
+                  <img
                       key={ev.id}
-                      src={media.primary}
-                      fallbackSrc={media.fallback}
-                      onMediaReady={() => setMediaLoaded(true)}
-                      onMediaFailed={() => setMediaLoaded(false)}
-                    />
-                  ) : (
-                    <img
-                      key={ev.id}
-                      src={media.primary}
+                      src={imgSrc}
                       alt={ev.title}
                       className="w-full h-full object-cover"
                       style={{ filter: 'saturate(0.7) brightness(0.75)' }}
@@ -363,23 +352,15 @@ export default function EventModal() {
                       }}
                       onError={(e) => {
                         const img = e.target as HTMLImageElement
-                        const step = parseInt(img.dataset.errorStep || '0', 10)
-                        if (step === 0 && media.fallback) {
-                          img.dataset.errorStep = '1'
-                          img.src = media.fallback
-                        } else if (step <= 1) {
-                          img.dataset.errorStep = '2'
-                          img.src = '/placeholder-event.svg'
-                          setMediaLoaded(false)
-                        }
+                        img.src = '/placeholder-event.svg'
+                        setMediaLoaded(false)
                       }}
                     />
-                  )}
                   <div className="absolute inset-0" style={{ background: 'linear-gradient(to top, rgba(8,8,8,0.95) 0%, transparent 55%)' }} />
 
                   {mediaLoaded && (
                     <button
-                      onClick={() => setLightbox({ src: media.primary, isVideo: media.isVideo, fallback: media.fallback })}
+                      onClick={() => setLightbox({ src: imgSrc, isVideo: false, fallback: null })}
                       className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center transition-opacity opacity-60 hover:opacity-100"
                       style={{
                         background: 'rgba(0,0,0,0.5)',

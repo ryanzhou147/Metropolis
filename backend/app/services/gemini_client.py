@@ -279,11 +279,12 @@ def call_gemini(
                 system_instruction=full_system_prompt,
                 response_mime_type="application/json",
                 temperature=0.3,
+                httpOptions=genai_types.HttpOptions(timeout=60_000),  # 60s timeout
             ),
         )
 
         raw_text = response.text or ""
-        return _parse_gemini_response(raw_text, query_type)
+        return _parse_gemini_response(raw_text, query_type, query=query)
 
     except ImportError:
         logger.warning("google-genai not installed; returning fallback response")
@@ -347,30 +348,117 @@ def _extract_json(raw_text: str) -> dict:
     raise ValueError(f"Could not parse JSON from Gemini response (len={len(raw_text)})")
 
 
-def _parse_gemini_response(raw_text: str, query_type: QueryType) -> AgentResponse:
-    try:
-        data = _extract_json(raw_text)
-        # Coerce enums
-        data["confidence"] = ConfidenceLevel(data.get("confidence", "low"))
-        data["query_type"] = QueryType(data.get("query_type", query_type))
+def _sanitize_gemini_fields(data: dict, query_type: QueryType, query: str = "") -> dict:
+    """Validate and fill defaults for Gemini response fields before Pydantic construction."""
+    defaulted: list[str] = []
 
-        if data.get("navigation_plan"):
+    # Required string field
+    if not data.get("answer"):
+        data["answer"] = "Analysis could not be completed."
+        defaulted.append("answer")
+
+    # Enum fields — coerce with fallback
+    try:
+        data["confidence"] = ConfidenceLevel(data.get("confidence", "low"))
+    except ValueError:
+        data["confidence"] = ConfidenceLevel.low
+        defaulted.append("confidence")
+
+    try:
+        data["query_type"] = QueryType(data.get("query_type", query_type))
+    except ValueError:
+        data["query_type"] = query_type
+        defaulted.append("query_type")
+
+    if not data.get("mode") or data["mode"] not in ("internal", "fallback_web", "update"):
+        data.setdefault("mode", "internal")
+        if data["mode"] not in ("internal", "fallback_web", "update"):
+            data["mode"] = "internal"
+            defaulted.append("mode")
+
+    # List/dict fields — ensure correct types
+    if not isinstance(data.get("relevant_event_ids"), list):
+        data["relevant_event_ids"] = []
+        defaulted.append("relevant_event_ids")
+
+    if not isinstance(data.get("reasoning_steps"), list):
+        data["reasoning_steps"] = []
+        defaulted.append("reasoning_steps")
+
+    if not isinstance(data.get("cited_event_map"), dict):
+        data["cited_event_map"] = {}
+        defaulted.append("cited_event_map")
+
+    # Nested models — safe construction with fallback to None/[]
+    if data.get("navigation_plan"):
+        try:
             data["navigation_plan"] = NavigationPlan(**data["navigation_plan"])
-        if data.get("financial_impact"):
+        except Exception:
+            data["navigation_plan"] = None
+            defaulted.append("navigation_plan")
+    else:
+        data["navigation_plan"] = None
+
+    if data.get("financial_impact"):
+        try:
             data["financial_impact"] = FinancialImpact(**data["financial_impact"])
-        if data.get("highlight_relationships"):
+        except Exception:
+            data["financial_impact"] = None
+            defaulted.append("financial_impact")
+
+    if data.get("highlight_relationships"):
+        try:
             data["highlight_relationships"] = [
                 HighlightRelationship(**r) for r in data["highlight_relationships"]
             ]
-        if data.get("source_snippets"):
-            data["source_snippets"] = [SourceSnippet(**s) for s in data["source_snippets"]]
-        if data.get("update_result"):
-            data["update_result"] = UpdateResult(**data["update_result"])
-        # cited_event_map is a plain dict – pass through as-is
-        if not isinstance(data.get("cited_event_map"), dict):
-            data["cited_event_map"] = {}
+        except Exception:
+            data["highlight_relationships"] = []
+            defaulted.append("highlight_relationships")
+    else:
+        data["highlight_relationships"] = []
 
+    if data.get("source_snippets"):
+        try:
+            data["source_snippets"] = [SourceSnippet(**s) for s in data["source_snippets"]]
+        except Exception:
+            data["source_snippets"] = []
+            defaulted.append("source_snippets")
+    else:
+        data["source_snippets"] = []
+
+    if data.get("update_result"):
+        try:
+            data["update_result"] = UpdateResult(**data["update_result"])
+        except Exception:
+            data["update_result"] = None
+            defaulted.append("update_result")
+
+    if defaulted:
+        logger.warning(
+            "Gemini response required defaults for fields %s | query=%r",
+            defaulted, query[:120],
+        )
+
+    return data
+
+
+def _parse_gemini_response(raw_text: str, query_type: QueryType, query: str = "") -> AgentResponse:
+    # Attempt 1: parse and sanitize JSON
+    try:
+        data = _extract_json(raw_text)
+        data = _sanitize_gemini_fields(data, query_type, query)
         return AgentResponse(**data)
+    except ValueError:
+        # JSON extraction completely failed — use raw text as answer
+        logger.warning("Unparseable Gemini response (len=%d), using raw text fallback | query=%r", len(raw_text), query[:120])
+        return AgentResponse(
+            answer=raw_text[:2000] if raw_text.strip() else "I was unable to generate a complete analysis. The AI response was empty.",
+            confidence=ConfidenceLevel.low,
+            caution="This response could not be fully structured. Analysis may be incomplete.",
+            mode="internal",
+            query_type=query_type,
+            reasoning_steps=["Gemini returned an unparseable response; showing raw text."],
+        )
     except Exception as exc:
         logger.error("Failed to parse Gemini response: %s\nRaw: %s", exc, raw_text[:500])
         return _build_fallback_response(f"Response parsing failed: {exc}", query_type)

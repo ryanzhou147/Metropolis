@@ -128,6 +128,16 @@ export default function AgentAnswerView({ response }: Props) {
         </div>
       )}
 
+      {/* Low confidence notice */}
+      {response.confidence === 'low' && (
+        <div className="p-2.5 flex gap-2" style={{ background: '#1a1a2a', border: '1px solid #2a2a3a', borderLeft: '2px solid #5a5a7a' }}>
+          <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" style={{ color: '#6a6a8a' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p className="text-xs leading-relaxed" style={{ color: '#7a7a9a' }}>Limited data available for this query. Analysis may be incomplete.</p>
+        </div>
+      )}
+
       {/* Answer with inline citation badges */}
       <div>
         <div className="text-xs uppercase tracking-widest mb-1.5" style={{ color: 'var(--text-muted)' }}>Analysis</div>
@@ -153,7 +163,7 @@ export default function AgentAnswerView({ response }: Props) {
                 [{seg.index}]
               </button>
             )
-          }) : <span>{response.answer}</span>}
+          }) : <span>{response.answer.replace(/\[cite:[^\]]*\]/g, '')}</span>}
         </p>
       </div>
 

@@ -5,7 +5,7 @@ from typing import Dict, Any
 
 from .db import get_pool
 from .models import RunSummary, NormalizedRecord
-from .content_repository import ensure_sources, insert_content
+from ..repositories.content_repository import ensure_sources, insert_content
 from .dedupe_service import is_duplicate
 
 logger = logging.getLogger(__name__)

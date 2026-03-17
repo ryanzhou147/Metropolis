@@ -66,3 +66,9 @@ html, body, #root {
 .generating-glow {
   animation: generating-glow 1.6s ease-in-out infinite;
 }
+
+/* Globe skeleton — wireframe spin */
+@keyframes globe-rotate {
+  from { transform: rotateY(0deg); }
+  to   { transform: rotateY(360deg); }
+}

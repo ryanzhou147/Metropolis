@@ -6,9 +6,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..models.agent_schemas import ConfidenceScoreResponse, RealTimeAnalysisRequest, RealTimeAnalysisResponse
+from ..rate_limit import limiter, RATE_LIMIT_ANALYSIS, RATE_LIMIT_CONFIDENCE
 from ..services.gemini_client import call_gemini_confidence_score, call_gemini_realtime_analysis
 
 try:
@@ -73,8 +74,7 @@ def get_content_points():
                     longitude,
                     event_type,
                     published_at,
-                    image_url,
-                    s3_url
+                    image_url
                 FROM content_table
                 WHERE latitude IS NOT NULL
                   AND longitude IS NOT NULL
@@ -94,7 +94,6 @@ def get_content_points():
                     "event_type": r["event_type"],
                     "published_at": r["published_at"].isoformat() if r["published_at"] else None,
                     "image_url": r["image_url"],
-                    "s3_url": r["s3_url"],
                 }
             )
         return {"points": points}
@@ -178,14 +177,15 @@ def get_content_arcs(threshold: float = Query(default=0.7, ge=0.0, le=1.0)):
 
 
 @router.post("/{content_id}/realtime-analysis", response_model=RealTimeAnalysisResponse)
-def realtime_analysis(content_id: str, request: RealTimeAnalysisRequest) -> RealTimeAnalysisResponse:
+@limiter.limit(RATE_LIMIT_ANALYSIS)
+def realtime_analysis(request: Request, content_id: str, body: RealTimeAnalysisRequest) -> RealTimeAnalysisResponse:
     """
     Fetch event title + body and call Gemini with Google Search grounding
     to produce a max-3-sentence persona-aware analysis of recent developments.
     """
     # Fetch title + body from DB (best-effort; fallback to empty strings)
-    title = ""
-    body = ""
+    evt_title = ""
+    evt_body = ""
     try:
         conn = _get_connection()
         try:
@@ -197,8 +197,8 @@ def realtime_analysis(content_id: str, request: RealTimeAnalysisRequest) -> Real
                 row = cur.fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail="Content not found")
-            title = row["title"] or ""
-            body = row["body"] or ""
+            evt_title = row["title"] or ""
+            evt_body = row["body"] or ""
         finally:
             conn.close()
     except HTTPException:
@@ -207,16 +207,17 @@ def realtime_analysis(content_id: str, request: RealTimeAnalysisRequest) -> Real
         raise HTTPException(status_code=404, detail="Content not found")
 
     analysis = call_gemini_realtime_analysis(
-        title=title,
-        body=body,
-        user_role=request.user_role,
-        user_industry=request.user_industry,
+        title=evt_title,
+        body=evt_body,
+        user_role=body.user_role,
+        user_industry=body.user_industry,
     )
     return RealTimeAnalysisResponse(analysis=analysis)
 
 
 @router.post("/{content_id}/confidence-score", response_model=ConfidenceScoreResponse)
-def confidence_score(content_id: str) -> ConfidenceScoreResponse:
+@limiter.limit(RATE_LIMIT_CONFIDENCE)
+def confidence_score(request: Request, content_id: str) -> ConfidenceScoreResponse:
     """
     Return the credibility score (0.31–1.0) for the given event.
     If a score is already stored in the database, returns it immediately.

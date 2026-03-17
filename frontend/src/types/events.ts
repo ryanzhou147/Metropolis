@@ -25,7 +25,6 @@ export interface Event {
   confidence_score: number
   canada_impact_summary: string
   image_url: string | null
-  image_s3_url: string | null
 }
 
 export interface SourceCard {
@@ -93,7 +92,6 @@ export interface ContentPoint {
   event_type: string | null
   published_at: string | null
   image_url: string | null
-  s3_url: string | null
 }
 
 export interface ContentPointsResponse {

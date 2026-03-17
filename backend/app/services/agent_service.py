@@ -9,6 +9,8 @@ Pipeline:
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from typing import Optional
 
@@ -21,6 +23,8 @@ from .agent_tools import (
     web_fallback_search,
 )
 from .gemini_client import call_gemini
+
+logger = logging.getLogger(__name__)
 
 
 def _classify_query(query: str) -> QueryType:
@@ -39,6 +43,30 @@ async def process_agent_query(
     user_role: Optional[str] = None,
     user_industry: Optional[str] = None,
 ) -> AgentResponse:
+    """Run the Graph-RAG pipeline. All blocking I/O (DB, Gemini) is offloaded to a thread."""
+    try:
+        return await asyncio.to_thread(
+            _run_pipeline_sync, query, user_role, user_industry,
+        )
+    except Exception as exc:
+        # Top-level safety net: guarantee a valid JSON response, never a 500
+        logger.error("Unhandled agent pipeline error for query=%r: %s", query[:120], exc, exc_info=True)
+        return AgentResponse(
+            answer=f"I couldn't complete the analysis. {_friendly_error(exc)}",
+            confidence=ConfidenceLevel.low,
+            caution="An unexpected error occurred in the analysis pipeline.",
+            mode="internal",
+            query_type=_classify_query(query),
+            reasoning_steps=[f"Pipeline error: {type(exc).__name__}: {exc}"],
+        )
+
+
+def _run_pipeline_sync(
+    query: str,
+    user_role: Optional[str] = None,
+    user_industry: Optional[str] = None,
+) -> AgentResponse:
+    """Synchronous Graph-RAG pipeline — runs in a worker thread."""
     query_type = _classify_query(query)
 
     # ── Step 1: find closest seeds — no coordinate requirement so we capture
@@ -95,8 +123,8 @@ async def process_agent_query(
     if seeds and query_type == QueryType.impact_analysis:
         tool_results["financial_impact"] = analyze_financial_impact(seeds[0]["id"])
 
-    # Web fallback only if we found nothing at all internally
-    use_web_fallback = len(expanded_events) == 0
+    # Web fallback when internal data is sparse (fewer than 2 seeds)
+    use_web_fallback = len(seeds) < 2
     if use_web_fallback:
         tool_results["web_results"] = web_fallback_search(query, limit=3)
 
@@ -105,12 +133,43 @@ async def process_agent_query(
         e["id"] for e in expanded_events
         if e.get("primary_latitude") is not None and e.get("primary_longitude") is not None
     }
+    # All known event IDs (for citation validation)
+    all_known_ids: set[str] = {e["id"] for e in expanded_events if e.get("id")}
 
     # ── Step 4: Gemini reasons over the full graph context ────────────────────
-    response = call_gemini(query, tool_results, query_type, use_web_fallback, user_role=user_role, user_industry=user_industry)
+    try:
+        response = call_gemini(query, tool_results, query_type, use_web_fallback, user_role=user_role, user_industry=user_industry)
+    except Exception as exc:
+        logger.error("Gemini call failed for query=%r: %s", query[:120], exc)
+        response = AgentResponse(
+            answer=f"I couldn't fully analyze this query right now. {_friendly_error(exc)}",
+            confidence=ConfidenceLevel.low,
+            caution="The AI analysis could not be completed. Please try again shortly.",
+            mode="internal",
+            query_type=query_type,
+            reasoning_steps=[f"Gemini API error: {type(exc).__name__}"],
+        )
 
-    # ── Post-process: strip fields that would break globe navigation ──────────
-    # Navigation plan fields must only reference events with coordinates.
+    # ── Post-process: validate citations against known events ─────────────────
+    answer = response.answer
+    stripped_cites: list[str] = []
+    for match in re.finditer(r'\[cite:([^\]]+)\]', answer):
+        ids = [id_.strip() for id_ in match.group(1).split(',') if id_.strip()]
+        valid = [id_ for id_ in ids if id_ in all_known_ids]
+        if not valid:
+            # All IDs in this cite tag are hallucinated — remove the tag
+            answer = answer.replace(match.group(0), "")
+            stripped_cites.extend(ids)
+        elif len(valid) < len(ids):
+            # Some IDs hallucinated — rewrite tag with only valid ones
+            new_tag = " ".join(f"[cite:{id_}]" for id_ in valid)
+            answer = answer.replace(match.group(0), new_tag)
+            stripped_cites.extend(id_ for id_ in ids if id_ not in all_known_ids)
+
+    if stripped_cites:
+        logger.warning("Stripped hallucinated citation IDs %s | query=%r", stripped_cites, query[:120])
+
+    # ── Post-process: validate navigation plan IDs ────────────────────────────
     nav = response.navigation_plan
     if nav:
         center = nav.center_on_event_id if nav.center_on_event_id in globe_ids else None
@@ -141,7 +200,7 @@ async def process_agent_query(
     # Gemini sometimes emits [cite:uuid1, uuid2] — split each match on commas
     cited_in_text = {
         id_.strip()
-        for raw in re.findall(r'\[cite:([^\]]+)\]', response.answer)
+        for raw in re.findall(r'\[cite:([^\]]+)\]', answer)
         for id_ in raw.split(',')
         if id_.strip()
     }
@@ -149,8 +208,22 @@ async def process_agent_query(
     final_map = {k: v for k, v in merged_map.items() if k in cited_in_text or k in relevant_set}
 
     return response.model_copy(update={
+        "answer": answer,
         "navigation_plan": nav,
         "highlight_relationships": hl,
         "financial_impact": fin,
         "cited_event_map": final_map,
     })
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Convert exception into a user-friendly message."""
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    if "timeout" in msg or "timed out" in msg:
+        return "The analysis timed out. Try a more specific question."
+    if "rate" in msg and "limit" in msg:
+        return "The service is temporarily busy. Please try again in a moment."
+    if "quota" in msg:
+        return "The AI service quota has been reached. Please try again later."
+    return f"An unexpected error occurred ({name}). Please try again."

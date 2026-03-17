@@ -1,16 +1,19 @@
 """
-Persist scraped market-signal rows to the database (engagement + content_table only).
+Content repository — unified data access for content_table.
 
-Uses 001_init_schema.sql: engagement, content_table. Does not write to sources.
-content_table: only id (default), title, body, url, published_at, image_url, event_type, engagement_id.
-Set DATABASE_URL to enable; if unset, persist methods no-op or raise.
+Sync functions (psycopg2): market-signal persistence.
+Async functions (asyncpg): ACLED ingestion pipeline.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Dict
+
+import asyncpg
 
 # Optional: only used when DATABASE_URL is set
 try:
@@ -194,3 +197,53 @@ def persist_market_signal_rows(rows: list[dict[str, Any]]) -> tuple[int, int]:
                 )
                 num_content += 1
         return num_eng, num_content
+
+
+# ---------------------------------------------------------------------------
+# Async functions (asyncpg) — used by the ACLED ingestion pipeline
+# ---------------------------------------------------------------------------
+
+_async_logger = logging.getLogger(__name__)
+
+
+async def ensure_sources(pool: asyncpg.Pool) -> Dict[str, int]:
+    """Ensures ACLED source exists. Returns dict mapping source names to IDs."""
+    sources_to_ensure = [
+        ("ACLED", "api", "https://acleddata.com/api/", 0.90)
+    ]
+    source_ids: Dict[str, int] = {}
+    async with pool.acquire() as conn:
+        for name, src_type, url, trust in sources_to_ensure:
+            row = await conn.fetchrow("SELECT id FROM sources WHERE name = $1", name)
+            if row:
+                source_ids[name] = row["id"]
+            else:
+                new_id = await conn.fetchval(
+                    "INSERT INTO sources (name, type, base_url, trust_score) VALUES ($1, $2, $3, $4) RETURNING id",
+                    name, src_type, url, trust,
+                )
+                source_ids[name] = new_id
+                _async_logger.info("Inserted new source: %s (ID: %s)", name, new_id)
+    return source_ids
+
+
+async def insert_content(pool: asyncpg.Pool, record: Any, source_id: int) -> None:
+    """Inserts a normalized record into content_table."""
+    async with pool.acquire() as conn:
+        meta_json = json.dumps(record.raw_metadata_json)
+        await conn.execute(
+            """
+            INSERT INTO content_table
+            (source_id, title, body, url, published_at, latitude, longitude, event_type, raw_metadata_json, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+            """,
+            source_id,
+            record.title,
+            record.body,
+            record.url,
+            record.published_at,
+            record.latitude,
+            record.longitude,
+            record.event_type.value,
+            meta_json,
+        )

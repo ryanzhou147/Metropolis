@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { getContentArcs, getContentPoints } from './api/client'
 import { EVENT_TYPE_COLORS, useAppContext } from './context/AppContext'
 import type { ArcData } from './context/AppContext'
@@ -12,15 +12,7 @@ import AgentLauncherButton from './components/Agent/AgentLauncherButton'
 import AgentPanel from './components/Agent/AgentPanel'
 import ErrorBoundary from './components/ErrorBoundary'
 import DesktopOnlyGuard from './components/DesktopOnlyGuard'
-
-function LoadingOverlay() {
-  return (
-    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center" style={{ background: 'var(--bg-base)' }}>
-      <div className="w-8 h-8 border border-[#505050] border-t-transparent animate-spin mb-4" style={{ borderRadius: 0 }} />
-      <p className="text-xs tracking-widest uppercase" style={{ color: 'var(--text-secondary)' }}>Loading event intelligence...</p>
-    </div>
-  )
-}
+import GlobeSkeleton from './components/Globe/GlobeSkeleton'
 
 function ErrorOverlay({ message }: { message: string }) {
   return (
@@ -80,7 +72,16 @@ function FilteredEmptyOverlay() {
 export default function App() {
   const { setEvents, setTimeline, setArcs } = useAppContext()
   const [loading, setLoading] = useState(true)
+  const [fadeOut, setFadeOut] = useState(false)
+  const [skeletonGone, setSkeletonGone] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // When data loading finishes, trigger fade-out then remove skeleton
+  const finishLoading = useCallback(() => {
+    setLoading(false)
+    setFadeOut(true)
+    setTimeout(() => setSkeletonGone(true), 450)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -111,7 +112,6 @@ export default function App() {
           confidence_score: 0.5,
           canada_impact_summary: '',
           image_url: p.image_url ?? null,
-          image_s3_url: p.s3_url ?? null,
         }))
 
         const times = mappedEvents
@@ -148,20 +148,21 @@ export default function App() {
         setTimeline(syntheticTimeline)
         setEvents(mappedEvents)
         setArcs(mappedArcs)
-        setLoading(false)
+        finishLoading()
       } catch (e) {
         if (!cancelled) {
           setError(String(e))
           setLoading(false)
+          setSkeletonGone(true)
         }
       }
     }
 
     load()
     return () => { cancelled = true }
-  }, [setEvents, setTimeline, setArcs])
+  }, [setEvents, setTimeline, setArcs, finishLoading])
 
-  if (loading) return <LoadingOverlay />
+  if (loading) return <GlobeSkeleton status="Connecting to intelligence network..." />
   if (error) return <ErrorOverlay message={error} />
 
   return (
@@ -183,10 +184,7 @@ export default function App() {
           </div>
         }>
           <Suspense fallback={
-            <div className="flex flex-col items-center justify-center h-full" style={{ background: 'var(--bg-base)' }}>
-              <div className="w-8 h-8 border border-[#505050] border-t-transparent animate-spin mb-4" style={{ borderRadius: 0 }} />
-              <p className="text-xs tracking-widest uppercase" style={{ color: 'var(--text-secondary)' }}>Loading globe...</p>
-            </div>
+            <GlobeSkeleton status="Rendering globe..." />
           }>
             <GlobeView />
           </Suspense>
@@ -223,6 +221,9 @@ export default function App() {
 
       {/* Agent launcher button — top-right corner */}
       <AgentLauncherButton />
+
+      {/* Fade-out skeleton overlay — shows briefly after data loads while globe renders */}
+      {!skeletonGone && <GlobeSkeleton status="Rendering globe..." fadeOut={fadeOut} />}
     </div>
   )
 }

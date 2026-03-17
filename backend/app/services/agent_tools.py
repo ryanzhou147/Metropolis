@@ -27,7 +27,7 @@ def _embed_query(text: str) -> list[float] | None:
         return None
     try:
         import openai
-        client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(api_key=api_key, timeout=15.0)
         response = client.embeddings.create(model="text-embedding-3-small", input=text)
         return response.data[0].embedding
     except Exception as exc:
@@ -41,7 +41,7 @@ def _get_connection():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL not set")
-    return psycopg2.connect(url)
+    return psycopg2.connect(url, connect_timeout=10)
 
 
 def search_events(
@@ -79,11 +79,11 @@ def search_events(
 
             coord_clause = "AND latitude IS NOT NULL AND longitude IS NOT NULL" if require_coords else ""
 
-            # ── STEP 1: keyword title match (always runs first) ──────────────
+            # ── STEP 1: keyword match on title AND body ──────────────────────
             # Seeds don't need globe coordinates — we need the most informative
             # articles, even if they have no lat/lng (those are still used as context).
             if keywords:
-                # Exact phrase — highest precision, no coordinate requirement
+                # Exact phrase in title — highest precision
                 cur.execute(
                     f"""
                     SELECT id::text, title, body, url, event_type, latitude, longitude,
@@ -103,7 +103,6 @@ def search_events(
                 # Keyword OR on title — score by how many keywords match
                 if len(rows) < limit:
                     ilike_conds = " OR ".join(["title ILIKE %s"] * len(keywords))
-                    # Count matching keywords as a relevance proxy
                     count_expr = " + ".join(
                         [f"(CASE WHEN title ILIKE %s THEN 1 ELSE 0 END)"] * len(keywords)
                     )
@@ -114,6 +113,30 @@ def search_events(
                                ({count_expr})::float / {len(keywords)} AS rank
                         FROM content_table
                         WHERE ({ilike_conds})
+                          {coord_clause}
+                          {type_clause}
+                        ORDER BY rank DESC, published_at DESC LIMIT %s
+                        """,
+                        [f"%{k}%" for k in keywords] * 2 + type_params + [limit],
+                    )
+                    for r in cur.fetchall():
+                        if r["id"] not in seen_ids:
+                            seen_ids.add(r["id"]); rows.append(r)
+
+                # ── STEP 1b: keyword OR on body text (catches events where
+                # the title doesn't mention the keyword but the body does) ──
+                if len(rows) < limit:
+                    body_ilike = " OR ".join(["body ILIKE %s"] * len(keywords))
+                    body_count = " + ".join(
+                        [f"(CASE WHEN body ILIKE %s THEN 1 ELSE 0 END)"] * len(keywords)
+                    )
+                    cur.execute(
+                        f"""
+                        SELECT id::text, title, body, url, event_type, latitude, longitude,
+                               published_at,
+                               ({body_count})::float / {len(keywords)} AS rank
+                        FROM content_table
+                        WHERE ({body_ilike})
                           {coord_clause}
                           {type_clause}
                         ORDER BY rank DESC, published_at DESC LIMIT %s
@@ -138,7 +161,7 @@ def search_events(
                     FROM content_table
                     WHERE embedding IS NOT NULL
                       {coord_clause}
-                      AND LENGTH(COALESCE(body, '')) > 150
+                      AND LENGTH(COALESCE(body, '')) > 50
                       {type_clause}
                     ORDER BY embedding <=> %s::vector ASC
                     LIMIT %s
@@ -224,6 +247,15 @@ def get_related_events(event_id: str, limit: int = 5) -> dict[str, Any]:
 
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Check if the seed event has an embedding first
+            cur.execute(
+                "SELECT embedding IS NOT NULL AS has_emb FROM content_table WHERE id = %s::uuid",
+                (event_id,),
+            )
+            row = cur.fetchone()
+            if not row or not row["has_emb"]:
+                return {"related_events": []}
+
             cur.execute(
                 """
                 SELECT id::text, title, event_type, latitude, longitude,
@@ -247,7 +279,7 @@ def get_related_events(event_id: str, limit: int = 5) -> dict[str, Any]:
                     "event_type": r["event_type"],
                     "primary_latitude": r["latitude"],
                     "primary_longitude": r["longitude"],
-                    "relationship_score": round(1 - float(r["distance"]), 3),
+                    "relationship_score": round(1 - float(r["distance"]), 3) if r["distance"] is not None else 0.0,
                 }
                 for r in rows
             ]
